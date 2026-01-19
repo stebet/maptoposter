@@ -1,3 +1,11 @@
 cache/*
 env/
 .env/
+
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.cache
+.vs/
