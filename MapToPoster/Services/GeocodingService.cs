@@ -1,16 +1,36 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Polly;
+using Polly.Extensions.Http;
 using MapToPoster.Models;
 
 namespace MapToPoster.Services;
 
 public class GeocodingService
 {
-    private static readonly HttpClient _httpClient = new()
+    private static readonly HttpClient _httpClient;
+    private static readonly IAsyncPolicy<HttpResponseMessage> _retryPolicy;
+
+    static GeocodingService()
     {
-        BaseAddress = new Uri("https://nominatim.openstreetmap.org/"),
-        DefaultRequestHeaders = { { "User-Agent", "MapToPoster/1.0" } }
-    };
+        // Configure retry policy: 3 retries with exponential backoff
+        _retryPolicy = HttpPolicyExtensions
+            .HandleTransientHttpError()
+            .WaitAndRetryAsync(
+                retryCount: 3,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (outcome, timespan, retryCount, context) =>
+                {
+                    Console.WriteLine($"  Retry {retryCount} after {timespan.TotalSeconds:F1}s due to: {outcome.Exception?.Message ?? outcome.Result?.StatusCode.ToString()}");
+                });
+
+        _httpClient = new HttpClient
+        {
+            BaseAddress = new Uri("https://nominatim.openstreetmap.org/"),
+            Timeout = TimeSpan.FromSeconds(30)
+        };
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "MapToPoster/1.0");
+    }
 
     public static async Task<GeoCoordinate?> GetCoordinatesAsync(string city, string country)
     {
@@ -24,7 +44,14 @@ public class GeocodingService
             var query = $"{city}, {country}";
             var url = $"search?q={Uri.EscapeDataString(query)}&format=json&limit=1";
 
-            var json = await _httpClient.GetStringAsync(url);
+            // Execute with retry policy
+            var response = await _retryPolicy.ExecuteAsync(async () =>
+            {
+                return await _httpClient.GetAsync(url);
+            });
+
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
             var results = JsonSerializer.Deserialize<List<NominatimResult>>(json);
 
             if (results != null && results.Count > 0)

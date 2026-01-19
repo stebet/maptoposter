@@ -1,16 +1,36 @@
-using System.Net.Http.Json;
 using System.Text.Json;
+using Polly;
+using Polly.Extensions.Http;
 using MapToPoster.Models;
 
 namespace MapToPoster.Services;
 
 public class OsmDataService
 {
-    private static readonly HttpClient _httpClient = new()
+    private static readonly HttpClient _httpClient;
+    private static readonly IAsyncPolicy<HttpResponseMessage> _retryPolicy;
+
+    static OsmDataService()
     {
-        BaseAddress = new Uri("https://overpass-api.de/api/"),
-        Timeout = TimeSpan.FromMinutes(5)
-    };
+        // Configure retry policy: 3 retries with exponential backoff
+        _retryPolicy = HttpPolicyExtensions
+            .HandleTransientHttpError()
+            .OrResult(msg => msg.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            .WaitAndRetryAsync(
+                retryCount: 3,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (outcome, timespan, retryCount, context) =>
+                {
+                    var feature = context.ContainsKey("feature") ? context["feature"].ToString() : "data";
+                    Console.WriteLine($"  Retry {retryCount} for {feature} after {timespan.TotalSeconds:F1}s");
+                });
+
+        _httpClient = new HttpClient
+        {
+            BaseAddress = new Uri("https://overpass-api.de/api/"),
+            Timeout = TimeSpan.FromMinutes(5)
+        };
+    }
 
     public static async Task<OsmData> FetchDataAsync(GeoCoordinate center, int distanceMeters)
     {
@@ -21,32 +41,54 @@ public class OsmDataService
         // Calculate bounding box
         var (south, west, north, east) = CalculateBoundingBox(center, distanceMeters);
 
-        // Fetch different types of data with progress updates
-        Console.WriteLine("Fetching map data:");
+        // Fetch different types of data in parallel with progress updates
+        Console.WriteLine("Fetching map data (in parallel):");
 
-        Console.Write("  Downloading street network... ");
-        var roads = await FetchRoadsAsync(south, west, north, east);
+        var roadTask = Task.Run(async () =>
+        {
+            Console.Write("  Downloading street network... ");
+            var roads = await FetchRoadsAsync(south, west, north, east);
+            Console.WriteLine("✓");
+            return roads;
+        });
+
+        var waterTask = Task.Run(async () =>
+        {
+            // Small delay to avoid simultaneous requests to same server
+            await Task.Delay(100);
+            Console.Write("  Downloading water features... ");
+            var water = await FetchWaterAsync(south, west, north, east);
+            Console.WriteLine("✓");
+            return water;
+        });
+
+        var parksTask = Task.Run(async () =>
+        {
+            // Small delay to avoid simultaneous requests to same server
+            await Task.Delay(200);
+            Console.Write("  Downloading parks/green spaces... ");
+            var parks = await FetchParksAsync(south, west, north, east);
+            Console.WriteLine("✓");
+            return parks;
+        });
+
+        // Wait for all tasks to complete
+        await Task.WhenAll(roadTask, waterTask, parksTask);
+
+        // Combine results
+        var roads = await roadTask;
         osmData.Ways.AddRange(roads.Ways);
         osmData.Nodes.AddRange(roads.Nodes);
-        Console.WriteLine("✓");
 
-        await Task.Delay(500); // Rate limiting
-
-        Console.Write("  Downloading water features... ");
-        var water = await FetchWaterAsync(south, west, north, east);
+        var water = await waterTask;
         osmData.Ways.AddRange(water.Ways);
         osmData.Nodes.AddRange(water.Nodes);
         osmData.Relations.AddRange(water.Relations);
-        Console.WriteLine("✓");
 
-        await Task.Delay(300); // Rate limiting
-
-        Console.Write("  Downloading parks/green spaces... ");
-        var parks = await FetchParksAsync(south, west, north, east);
+        var parks = await parksTask;
         osmData.Ways.AddRange(parks.Ways);
         osmData.Nodes.AddRange(parks.Nodes);
         osmData.Relations.AddRange(parks.Relations);
-        Console.WriteLine("✓");
 
         Console.WriteLine("✓ All data downloaded successfully!");
 
@@ -64,7 +106,7 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query);
+        return await ExecuteOverpassQueryAsync(query, "roads");
     }
 
     private static async Task<OsmData> FetchWaterAsync(double south, double west, double north, double east)
@@ -80,7 +122,7 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query);
+        return await ExecuteOverpassQueryAsync(query, "water");
     }
 
     private static async Task<OsmData> FetchParksAsync(double south, double west, double north, double east)
@@ -96,10 +138,10 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query);
+        return await ExecuteOverpassQueryAsync(query, "parks");
     }
 
-    private static async Task<OsmData> ExecuteOverpassQueryAsync(string query)
+    private static async Task<OsmData> ExecuteOverpassQueryAsync(string query, string feature)
     {
         try
         {
@@ -108,7 +150,16 @@ out skel qt;
                 { "data", query }
             });
 
-            var response = await _httpClient.PostAsync("interpreter", content);
+            // Create context for logging
+            var context = new Context($"fetch-{feature}");
+            context["feature"] = feature;
+
+            // Execute with retry policy
+            var response = await _retryPolicy.ExecuteAsync(async (ctx) =>
+            {
+                return await _httpClient.PostAsync("interpreter", content);
+            }, context);
+
             response.EnsureSuccessStatusCode();
 
             var json = await response.Content.ReadAsStringAsync();
