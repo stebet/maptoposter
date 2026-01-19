@@ -181,18 +181,20 @@ MapToPoster/
 - **.NET 10** - Latest .NET runtime
 - **System.CommandLine** - Command-line argument parsing
 - **SkiaSharp** - Cross-platform 2D graphics library
-- **Polly** - Resilience and transient-fault-handling library
+- **Microsoft.Extensions.Http.Resilience** - Modern HTTP resilience library
+- **Polly v8** - Resilience and transient-fault-handling library
 - **Nominatim** - OpenStreetMap geocoding service
 - **Overpass API** - OpenStreetMap data query service
 
 ## Resilience Features
 
-The application includes robust HTTP resilience patterns:
+The application uses Microsoft.Extensions.Http.Resilience with Polly v8 for robust HTTP resilience patterns:
 
 - **Automatic Retries**: Up to 3 retries with exponential backoff (2s, 4s, 8s)
 - **Timeout Protection**: 30-second timeout for geocoding, 5-minute timeout for OSM data
 - **Parallel Data Fetching**: Roads, water, and parks data are fetched concurrently for faster execution
 - **Transient Error Handling**: Automatically handles network failures and temporary API issues
+- **Modern Resilience Pipeline**: Uses Polly v8 ResiliencePipeline for standardized error handling
 - **Rate Limiting**: Respects API rate limits with built-in delays
 
 These features ensure the application can handle:

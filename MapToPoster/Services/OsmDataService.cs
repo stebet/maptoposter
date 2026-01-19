@@ -1,6 +1,6 @@
 using System.Text.Json;
 using Polly;
-using Polly.Extensions.Http;
+using Polly.Retry;
 using MapToPoster.Models;
 
 namespace MapToPoster.Services;
@@ -8,27 +8,34 @@ namespace MapToPoster.Services;
 public class OsmDataService
 {
     private static readonly HttpClient _httpClient;
-    private static readonly IAsyncPolicy<HttpResponseMessage> _retryPolicy;
+    private static readonly ResiliencePipeline<HttpResponseMessage> _resiliencePipeline;
 
     static OsmDataService()
     {
-        // Configure retry policy: 3 retries with exponential backoff
-        _retryPolicy = HttpPolicyExtensions
-            .HandleTransientHttpError()
-            .OrResult(msg => msg.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-            .WaitAndRetryAsync(
-                retryCount: 3,
-                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                onRetry: (outcome, timespan, retryCount, context) =>
+        // Configure resilience pipeline with retry and timeout
+        _resiliencePipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+            .AddRetry(new RetryStrategyOptions<HttpResponseMessage>
+            {
+                MaxRetryAttempts = 3,
+                Delay = TimeSpan.FromSeconds(2),
+                BackoffType = DelayBackoffType.Exponential,
+                ShouldHandle = args => ValueTask.FromResult(
+                    args.Outcome.Exception != null ||
+                    args.Outcome.Result?.IsSuccessStatusCode == false ||
+                    args.Outcome.Result?.StatusCode == System.Net.HttpStatusCode.TooManyRequests),
+                OnRetry = args =>
                 {
-                    var feature = context.ContainsKey("feature") ? context["feature"].ToString() : "data";
-                    Console.WriteLine($"  Retry {retryCount} for {feature} after {timespan.TotalSeconds:F1}s");
-                });
+                    var attempt = args.AttemptNumber + 1;
+                    Console.WriteLine($"  Retry {attempt} for OSM data after {args.RetryDelay.TotalSeconds:F1}s");
+                    return ValueTask.CompletedTask;
+                }
+            })
+            .AddTimeout(TimeSpan.FromMinutes(5))
+            .Build();
 
         _httpClient = new HttpClient
         {
-            BaseAddress = new Uri("https://overpass-api.de/api/"),
-            Timeout = TimeSpan.FromMinutes(5)
+            BaseAddress = new Uri("https://overpass-api.de/api/")
         };
     }
 
@@ -106,7 +113,7 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query, "roads");
+        return await ExecuteOverpassQueryAsync(query);
     }
 
     private static async Task<OsmData> FetchWaterAsync(double south, double west, double north, double east)
@@ -122,7 +129,7 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query, "water");
+        return await ExecuteOverpassQueryAsync(query);
     }
 
     private static async Task<OsmData> FetchParksAsync(double south, double west, double north, double east)
@@ -138,10 +145,10 @@ out body;
 >;
 out skel qt;
 ";
-        return await ExecuteOverpassQueryAsync(query, "parks");
+        return await ExecuteOverpassQueryAsync(query);
     }
 
-    private static async Task<OsmData> ExecuteOverpassQueryAsync(string query, string feature)
+    private static async Task<OsmData> ExecuteOverpassQueryAsync(string query)
     {
         try
         {
@@ -150,15 +157,9 @@ out skel qt;
                 { "data", query }
             });
 
-            // Create context for logging
-            var context = new Context($"fetch-{feature}");
-            context["feature"] = feature;
-
-            // Execute with retry policy
-            var response = await _retryPolicy.ExecuteAsync(async (ctx) =>
-            {
-                return await _httpClient.PostAsync("interpreter", content);
-            }, context);
+            var response = await _resiliencePipeline.ExecuteAsync(
+                async ct => await _httpClient.PostAsync("interpreter", content, ct),
+                CancellationToken.None);
 
             response.EnsureSuccessStatusCode();
 

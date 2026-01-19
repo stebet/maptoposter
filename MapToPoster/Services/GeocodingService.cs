@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Polly;
-using Polly.Extensions.Http;
+using Polly.Retry;
 using MapToPoster.Models;
 
 namespace MapToPoster.Services;
@@ -9,25 +9,33 @@ namespace MapToPoster.Services;
 public class GeocodingService
 {
     private static readonly HttpClient _httpClient;
-    private static readonly IAsyncPolicy<HttpResponseMessage> _retryPolicy;
+    private static readonly ResiliencePipeline<HttpResponseMessage> _resiliencePipeline;
 
     static GeocodingService()
     {
-        // Configure retry policy: 3 retries with exponential backoff
-        _retryPolicy = HttpPolicyExtensions
-            .HandleTransientHttpError()
-            .WaitAndRetryAsync(
-                retryCount: 3,
-                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                onRetry: (outcome, timespan, retryCount, context) =>
+        // Configure resilience pipeline with retry
+        _resiliencePipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
+            .AddRetry(new RetryStrategyOptions<HttpResponseMessage>
+            {
+                MaxRetryAttempts = 3,
+                Delay = TimeSpan.FromSeconds(2),
+                BackoffType = DelayBackoffType.Exponential,
+                ShouldHandle = args => ValueTask.FromResult(
+                    args.Outcome.Exception != null ||
+                    args.Outcome.Result?.IsSuccessStatusCode == false),
+                OnRetry = args =>
                 {
-                    Console.WriteLine($"  Retry {retryCount} after {timespan.TotalSeconds:F1}s due to: {outcome.Exception?.Message ?? outcome.Result?.StatusCode.ToString()}");
-                });
+                    var attempt = args.AttemptNumber + 1;
+                    Console.WriteLine($"  Retry {attempt} for geocoding after {args.RetryDelay.TotalSeconds:F1}s");
+                    return ValueTask.CompletedTask;
+                }
+            })
+            .AddTimeout(TimeSpan.FromSeconds(30))
+            .Build();
 
         _httpClient = new HttpClient
         {
-            BaseAddress = new Uri("https://nominatim.openstreetmap.org/"),
-            Timeout = TimeSpan.FromSeconds(30)
+            BaseAddress = new Uri("https://nominatim.openstreetmap.org/")
         };
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "MapToPoster/1.0");
     }
@@ -44,13 +52,12 @@ public class GeocodingService
             var query = $"{city}, {country}";
             var url = $"search?q={Uri.EscapeDataString(query)}&format=json&limit=1";
 
-            // Execute with retry policy
-            var response = await _retryPolicy.ExecuteAsync(async () =>
-            {
-                return await _httpClient.GetAsync(url);
-            });
+            var response = await _resiliencePipeline.ExecuteAsync(
+                async ct => await _httpClient.GetAsync(url, ct),
+                CancellationToken.None);
 
             response.EnsureSuccessStatusCode();
+            
             var json = await response.Content.ReadAsStringAsync();
             var results = JsonSerializer.Deserialize<List<NominatimResult>>(json);
 
