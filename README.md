@@ -2,8 +2,28 @@
 
 Generate beautiful, minimalist map posters for any city in the world.
 
+> **Note**: This project is now available in two implementations:
+> - **Python** (original) - See instructions below
+> - **C#/.NET 10** - See [MapToPoster/README.md](MapToPoster/README.md)
+
 <img src="posters/singapore_neon_cyberpunk_20260108_184503.png" width="250">
 <img src="posters/dubai_midnight_blue_20260108_174920.png" width="250">
+
+## Python Version
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+## C# Version
+
+See [MapToPoster/README.md](MapToPoster/README.md) for the C#/.NET 10 implementation with:
+- .NET 10 and System.CommandLine
+- SkiaSharp for rendering
+- Cross-platform support
+- Standalone executable publishing
 
 ## Examples
 
